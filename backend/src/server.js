@@ -1,4 +1,3 @@
-// backend/src/server.js
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
@@ -56,11 +55,20 @@ const messageSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   nickname: { type: String, required: true },
   text: { type: String, required: true },
+  room: { type: String, required: true, default: "главная" },
   timestamp: { type: Date, default: Date.now },
+});
+
+const roomSchema = new mongoose.Schema({
+  name: { type: String, required: true, unique: true },
+  displayName: { type: String, required: true },
+  description: { type: String },
+  createdAt: { type: Date, default: Date.now },
 });
 
 const User = mongoose.model("User", userSchema);
 const Message = mongoose.model("Message", messageSchema);
+const Room = mongoose.model("Room", roomSchema);
 
 // JWT Secret
 const JWT_SECRET =
@@ -107,6 +115,33 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// Инициализация комнат по умолчанию
+const initDefaultRooms = async () => {
+  const defaultRooms = [
+    { name: "главная", displayName: "Главная", description: "Общий чат" },
+    {
+      name: "знакомства",
+      displayName: "Знакомства",
+      description: "Знакомства и общение",
+    },
+    {
+      name: "беспредел",
+      displayName: "Беспредел",
+      description: "Свободное общение",
+    },
+  ];
+
+  for (const room of defaultRooms) {
+    await Room.findOneAndUpdate({ name: room.name }, room, {
+      upsert: true,
+      new: true,
+    });
+  }
+  console.log("✅ Комнаты инициализированы");
+};
+
+initDefaultRooms();
+
 // ===== API Routes =====
 
 // Регистрация
@@ -119,7 +154,6 @@ app.post("/api/register", async (req, res) => {
 
     const { nickname, email, password } = value;
 
-    // Проверка существования
     const existingUser = await User.findOne({
       $or: [{ nickname }, ...(email ? [{ email }] : [])],
     });
@@ -128,10 +162,8 @@ app.post("/api/register", async (req, res) => {
       return res.status(400).json({ error: "Пользователь уже существует" });
     }
 
-    // Хеширование пароля
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Создание пользователя
     const user = new User({
       nickname,
       email: email || null,
@@ -140,7 +172,6 @@ app.post("/api/register", async (req, res) => {
 
     await user.save();
 
-    // Генерация JWT
     const token = jwt.sign(
       { id: user._id, nickname: user.nickname },
       JWT_SECRET,
@@ -171,7 +202,6 @@ app.post("/api/login", async (req, res) => {
 
     const { login, password } = value;
 
-    // Поиск пользователя
     const user = await User.findOne({
       $or: [{ nickname: login }, { email: login }],
     });
@@ -180,17 +210,14 @@ app.post("/api/login", async (req, res) => {
       return res.status(401).json({ error: "Неверные учетные данные" });
     }
 
-    // Проверка пароля
     const isPasswordValid = await bcrypt.compare(password, user.password);
     if (!isPasswordValid) {
       return res.status(401).json({ error: "Неверные учетные данные" });
     }
 
-    // Обновление lastSeen
     user.lastSeen = new Date();
     await user.save();
 
-    // Генерация JWT
     const token = jwt.sign(
       { id: user._id, nickname: user.nickname },
       JWT_SECRET,
@@ -222,16 +249,13 @@ app.post("/api/forgot-password", async (req, res) => {
 
     const user = await User.findOne({ email });
 
-    // Не раскрываем существование email
     if (!user) {
       return res.json({ message: "Если email существует, письмо отправлено" });
     }
 
-    // Генерация токена
     const resetToken = jwt.sign({ email }, JWT_SECRET, { expiresIn: "1h" });
     const resetUrl = `${process.env.CLIENT_URL}/reset-password/${resetToken}`;
 
-    // Отправка email
     if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
       await transporter.sendMail({
         from: process.env.EMAIL_USER,
@@ -270,7 +294,6 @@ app.post("/api/reset-password", async (req, res) => {
         .json({ error: "Пароль должен быть минимум 6 символов" });
     }
 
-    // Проверка токена
     const decoded = jwt.verify(token, JWT_SECRET);
     const user = await User.findOne({ email: decoded.email });
 
@@ -278,7 +301,6 @@ app.post("/api/reset-password", async (req, res) => {
       return res.status(404).json({ error: "Пользователь не найден" });
     }
 
-    // Обновление пароля
     user.password = await bcrypt.hash(newPassword, 10);
     await user.save();
 
@@ -292,11 +314,24 @@ app.post("/api/reset-password", async (req, res) => {
   }
 });
 
-// Получение истории сообщений
-app.get("/api/messages", authenticateToken, async (req, res) => {
+// Получение списка комнат (доступно без авторизации)
+app.get("/api/rooms", async (req, res) => {
   try {
+    const rooms = await Room.find().sort({ name: 1 }).lean();
+    res.json(rooms);
+  } catch (error) {
+    console.error("Ошибка получения комнат:", error);
+    res.status(500).json({ error: "Ошибка сервера" });
+  }
+});
+
+// Получение истории сообщений комнаты
+app.get("/api/messages/:room", authenticateToken, async (req, res) => {
+  try {
+    const { room } = req.params;
     const limit = parseInt(req.query.limit) || 50;
-    const messages = await Message.find()
+
+    const messages = await Message.find({ room })
       .sort({ timestamp: -1 })
       .limit(limit)
       .lean();
@@ -332,15 +367,48 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// ===== Socket.io =====
+// ===== Socket.io для комнат =====
 
-const connectedUsers = new Map(); // socketId -> userId
+// Структура: roomName -> Set of { socketId, userId, nickname }
+const roomUsers = new Map();
+
+// socketId -> { userId, nickname, currentRoom }
+const connectedUsers = new Map();
+
+const getRoomUsers = (roomName) => {
+  const users = roomUsers.get(roomName) || new Set();
+  return Array.from(users);
+};
+
+const getRoomsInfo = async () => {
+  try {
+    // Получаем все комнаты из БД
+    const allRooms = await Room.find().lean();
+
+    // Добавляем информацию о пользователях
+    const roomsWithUsers = allRooms.map((room) => {
+      const users = roomUsers.get(room.name) || new Set();
+      return {
+        name: room.name,
+        displayName: room.displayName,
+        description: room.description,
+        userCount: users.size,
+        users: Array.from(users),
+      };
+    });
+
+    return roomsWithUsers;
+  } catch (error) {
+    console.error("Ошибка получения информации о комнатах:", error);
+    return [];
+  }
+};
 
 io.on("connection", (socket) => {
   console.log("🔌 Новое подключение:", socket.id);
 
   // Аутентификация
-  socket.on("authenticate", async (token) => {
+  socket.on("authenticate", async ({ token, room }) => {
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
       const user = await User.findById(decoded.id);
@@ -352,29 +420,137 @@ io.on("connection", (socket) => {
 
       socket.userId = user._id.toString();
       socket.nickname = user.nickname;
-      connectedUsers.set(socket.id, user._id.toString());
+      socket.currentRoom = room || "главная"; // Используем выбранную комнату
 
-      // Обновление lastSeen
+      connectedUsers.set(socket.id, {
+        userId: socket.userId,
+        nickname: socket.nickname,
+        currentRoom: socket.currentRoom,
+      });
+
       user.lastSeen = new Date();
       await user.save();
 
-      // Отправка истории сообщений
-      const messages = await Message.find()
+      // Присоединение к выбранной комнате
+      socket.join(socket.currentRoom);
+
+      // Добавление в список пользователей комнаты
+      if (!roomUsers.has(socket.currentRoom)) {
+        roomUsers.set(socket.currentRoom, new Set());
+      }
+      roomUsers.get(socket.currentRoom).add({
+        socketId: socket.id,
+        userId: socket.userId,
+        nickname: socket.nickname,
+      });
+
+      // Отправка истории сообщений выбранной комнаты
+      const messages = await Message.find({ room: socket.currentRoom })
         .sort({ timestamp: -1 })
         .limit(50)
         .lean();
 
       socket.emit("message_history", messages.reverse());
-      socket.emit("authenticated", { nickname: user.nickname });
+      socket.emit("authenticated", {
+        nickname: user.nickname,
+        room: socket.currentRoom,
+      });
 
-      // Уведомление о подключении
-      io.emit("user_joined", { nickname: user.nickname });
+      // Отправка информации о комнатах всем
+      const roomsInfo = await getRoomsInfo();
+      io.emit("rooms_update", roomsInfo);
 
-      console.log("✅ Пользователь авторизован:", user.nickname);
+      // Уведомление в комнату о новом пользователе
+      io.to(socket.currentRoom).emit("user_joined", {
+        nickname: user.nickname,
+        room: socket.currentRoom,
+      });
+
+      console.log(
+        "✅ Пользователь авторизован:",
+        user.nickname,
+        "в комнате:",
+        socket.currentRoom
+      );
     } catch (error) {
       console.error("Ошибка аутентификации:", error);
       socket.emit("auth_error", "Недействительный токен");
       socket.disconnect();
+    }
+  });
+
+  // Смена комнаты
+  socket.on("join_room", async (roomName) => {
+    if (!socket.userId) {
+      return socket.emit("error", "Не авторизован");
+    }
+
+    try {
+      const oldRoom = socket.currentRoom;
+
+      // Покинуть старую комнату
+      if (oldRoom) {
+        socket.leave(oldRoom);
+        const oldRoomUsers = roomUsers.get(oldRoom);
+        if (oldRoomUsers) {
+          // Удаление пользователя из старой комнаты
+          oldRoomUsers.forEach((u) => {
+            if (u.socketId === socket.id) {
+              oldRoomUsers.delete(u);
+            }
+          });
+        }
+
+        io.to(oldRoom).emit("user_left", {
+          nickname: socket.nickname,
+          room: oldRoom,
+        });
+      }
+
+      // Присоединиться к новой комнате
+      socket.join(roomName);
+      socket.currentRoom = roomName;
+
+      const userInfo = connectedUsers.get(socket.id);
+      if (userInfo) {
+        userInfo.currentRoom = roomName;
+      }
+
+      // Добавление в список пользователей новой комнаты
+      if (!roomUsers.has(roomName)) {
+        roomUsers.set(roomName, new Set());
+      }
+      roomUsers.get(roomName).add({
+        socketId: socket.id,
+        userId: socket.userId,
+        nickname: socket.nickname,
+      });
+
+      // Отправка истории новой комнаты
+      const messages = await Message.find({ room: roomName })
+        .sort({ timestamp: -1 })
+        .limit(50)
+        .lean();
+
+      socket.emit("room_changed", {
+        room: roomName,
+        messages: messages.reverse(),
+      });
+
+      // Обновление информации о комнатах
+      const roomsInfo = await getRoomsInfo();
+      io.emit("rooms_update", roomsInfo);
+
+      // Уведомление в новую комнату
+      io.to(roomName).emit("user_joined", {
+        nickname: socket.nickname,
+        room: roomName,
+      });
+
+      console.log(`👤 ${socket.nickname} переключился в комнату: ${roomName}`);
+    } catch (error) {
+      console.error("Ошибка смены комнаты:", error);
+      socket.emit("error", "Ошибка смены комнаты");
     }
   });
 
@@ -389,16 +565,18 @@ io.on("connection", (socket) => {
         userId: socket.userId,
         nickname: socket.nickname,
         text: messageData.text,
+        room: socket.currentRoom,
       });
 
       await message.save();
 
-      // Broadcast всем
-      io.emit("new_message", {
+      // Broadcast в текущую комнату
+      io.to(socket.currentRoom).emit("new_message", {
         id: message._id,
         userId: message.userId,
         nickname: message.nickname,
         text: message.text,
+        room: message.room,
         timestamp: message.timestamp,
       });
     } catch (error) {
@@ -409,16 +587,38 @@ io.on("connection", (socket) => {
 
   // Уведомление о печати
   socket.on("typing", () => {
-    if (socket.userId) {
-      socket.broadcast.emit("user_typing", { nickname: socket.nickname });
+    if (socket.userId && socket.currentRoom) {
+      socket.to(socket.currentRoom).emit("user_typing", {
+        nickname: socket.nickname,
+        room: socket.currentRoom,
+      });
     }
   });
 
   // Отключение
-  socket.on("disconnect", () => {
-    if (socket.userId) {
-      io.emit("user_left", { nickname: socket.nickname });
+  socket.on("disconnect", async () => {
+    if (socket.userId && socket.currentRoom) {
+      // Удаление из комнаты
+      const roomUsersSet = roomUsers.get(socket.currentRoom);
+      if (roomUsersSet) {
+        roomUsersSet.forEach((u) => {
+          if (u.socketId === socket.id) {
+            roomUsersSet.delete(u);
+          }
+        });
+      }
+
+      io.to(socket.currentRoom).emit("user_left", {
+        nickname: socket.nickname,
+        room: socket.currentRoom,
+      });
+
       connectedUsers.delete(socket.id);
+
+      // Обновление информации о комнатах
+      const roomsInfo = await getRoomsInfo();
+      io.emit("rooms_update", roomsInfo);
+
       console.log("👋 Пользователь отключился:", socket.nickname);
     }
   });
