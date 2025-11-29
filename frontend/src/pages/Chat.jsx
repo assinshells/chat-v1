@@ -15,6 +15,7 @@ function Chat({ setAuth }) {
     const [currentRoom, setCurrentRoom] = useState('главная');
     const [rooms, setRooms] = useState([]);
     const [showSidebar, setShowSidebar] = useState(true);
+    const [selectedUser, setSelectedUser] = useState(null); // Выбранный адресат
     const messagesEndRef = useRef(null);
     const socketRef = useRef(null);
     const typingTimeoutRef = useRef(null);
@@ -40,7 +41,6 @@ function Chat({ setAuth }) {
                 const roomsData = await response.json();
                 console.log('🏠 Загружены комнаты:', roomsData);
 
-                // Преобразуем в формат с userCount
                 const roomsWithCounts = roomsData.map(room => ({
                     name: room.name,
                     displayName: room.displayName,
@@ -51,7 +51,6 @@ function Chat({ setAuth }) {
                 setRooms(roomsWithCounts);
             } catch (error) {
                 console.error('Ошибка загрузки комнат:', error);
-                // Fallback на дефолтные комнаты
                 setRooms([
                     { name: 'главная', displayName: 'Главная', userCount: 0, users: [] },
                     { name: 'знакомства', displayName: 'Знакомства', userCount: 0, users: [] },
@@ -98,6 +97,7 @@ function Chat({ setAuth }) {
             console.log('🚪 Комната изменена:', data.room);
             setCurrentRoom(data.room);
             setMessages(data.messages);
+            setSelectedUser(null); // Сбросить выбранного пользователя
         });
 
         socket.on('rooms_update', (roomsData) => {
@@ -161,8 +161,19 @@ function Chat({ setAuth }) {
             return;
         }
 
-        socketRef.current.emit('send_message', { text: inputMessage.trim() });
+        const messageData = {
+            text: inputMessage.trim()
+        };
+
+        // Если выбран адресат, добавляем его в сообщение
+        if (selectedUser) {
+            messageData.toUserId = selectedUser.userId;
+            messageData.toNickname = selectedUser.nickname;
+        }
+
+        socketRef.current.emit('send_message', messageData);
         setInputMessage('');
+        setSelectedUser(null); // Сбросить выбор после отправки
     };
 
     const handleInputChange = (e) => {
@@ -177,8 +188,23 @@ function Chat({ setAuth }) {
         if (socketRef.current && connected && roomName !== currentRoom) {
             console.log('🔄 Переключение на комнату:', roomName);
             socketRef.current.emit('join_room', roomName);
-            setShowSidebar(false); // Закрыть сайдбар на мобильных
+            setShowSidebar(false);
         }
+    };
+
+    const handleUserClick = (u) => {
+        if (u.userId === user.id) return; // Свой ник не кликабелен
+
+        setSelectedUser({
+            userId: u.userId,
+            nickname: u.nickname
+        });
+        console.log('👤 Выбран пользователь:', u.nickname);
+    };
+
+    const handleTimeClick = (timestamp) => {
+        const timeStr = formatTime(timestamp);
+        setInputMessage(prev => prev ? `${prev} ${timeStr}` : timeStr);
     };
 
     const handleLogout = () => {
@@ -297,7 +323,7 @@ function Chat({ setAuth }) {
 
                 <div className="d-flex flex-grow-1" style={{ overflow: 'hidden' }}>
                     {/* Messages Area */}
-                    <div className="messages-area flex-grow-1 overflow-auto bg-light p-3">
+                    <div className="messages-area flex-grow-1 overflow-auto p-3">
                         <div className="container-fluid">
                             {messages.length === 0 ? (
                                 <div className="text-center text-muted mt-5">
@@ -307,30 +333,54 @@ function Chat({ setAuth }) {
                                 messages.map((msg) => (
                                     <div
                                         key={msg.id || msg._id}
-                                        className={`message mb-3 ${msg.userId === user.id ? 'text-end' : 'text-start'
-                                            }`}
+                                        className="message-row mb-2"
                                     >
-                                        <div
-                                            className={`d-inline-block p-3 rounded shadow-sm ${msg.userId === user.id
-                                                    ? 'bg-primary text-white'
-                                                    : 'bg-white'
-                                                }`}
-                                            style={{ maxWidth: '70%' }}
-                                        >
-                                            {msg.userId !== user.id && (
-                                                <div className="fw-bold small mb-1 text-primary">
-                                                    {msg.nickname}
-                                                </div>
-                                            )}
-                                            <div>{msg.text}</div>
-                                            <div
-                                                className={`small mt-1 ${msg.userId === user.id
-                                                        ? 'text-white-50'
-                                                        : 'text-muted'
-                                                    }`}
+                                        <div className="d-flex align-items-baseline">
+                                            {/* Время (кликабельное) */}
+                                            <span
+                                                className="message-time text-muted me-2"
+                                                onClick={() => handleTimeClick(msg.timestamp)}
+                                                style={{
+                                                    cursor: 'pointer',
+                                                    fontSize: '0.85rem',
+                                                    minWidth: '45px'
+                                                }}
+                                                title="Кликните, чтобы вставить время"
                                             >
                                                 {formatTime(msg.timestamp)}
-                                            </div>
+                                            </span>
+
+                                            {/* Никнейм (кликабельный если не мой) */}
+                                            <span
+                                                className={`message-nickname fw-bold me-2 ${msg.userId !== user.id ? 'clickable-nickname' : 'my-nickname'
+                                                    }`}
+                                                onClick={() => {
+                                                    if (msg.userId !== user.id) {
+                                                        handleUserClick({ userId: msg.userId, nickname: msg.nickname });
+                                                    }
+                                                }}
+                                                style={{
+                                                    cursor: msg.userId !== user.id ? 'pointer' : 'default',
+                                                    color: msg.userId === user.id ? '#0d6efd' : '#6c757d',
+                                                    fontSize: '0.95rem'
+                                                }}
+                                                title={msg.userId !== user.id ? 'Кликните, чтобы ответить' : 'Вы'}
+                                            >
+                                                {msg.nickname}
+                                                {msg.userId === user.id && ' (я)'}:
+                                            </span>
+
+                                            {/* Адресат (если есть) */}
+                                            {msg.toNickname && (
+                                                <span className="text-primary me-2" style={{ fontSize: '0.9rem' }}>
+                                                    → @{msg.toNickname}
+                                                </span>
+                                            )}
+
+                                            {/* Текст сообщения */}
+                                            <span className="message-text" style={{ fontSize: '0.95rem' }}>
+                                                {msg.text}
+                                            </span>
                                         </div>
                                     </div>
                                 ))
@@ -357,7 +407,16 @@ function Chat({ setAuth }) {
                             {getCurrentRoomUsers().map((u) => (
                                 <div
                                     key={u.socketId}
-                                    className="user-item d-flex align-items-center mb-2"
+                                    className={`user-item d-flex align-items-center mb-2 ${u.userId !== user.id ? 'clickable-user' : ''
+                                        }`}
+                                    onClick={() => handleUserClick(u)}
+                                    style={{
+                                        cursor: u.userId !== user.id ? 'pointer' : 'default',
+                                        padding: '0.5rem',
+                                        borderRadius: '0.25rem',
+                                        transition: 'background-color 0.2s'
+                                    }}
+                                    title={u.userId !== user.id ? 'Кликните, чтобы отправить сообщение' : 'Вы'}
                                 >
                                     <div
                                         className="rounded-circle bg-success me-2"
@@ -365,7 +424,7 @@ function Chat({ setAuth }) {
                                     ></div>
                                     <span className={u.userId === user.id ? 'fw-bold' : ''}>
                                         {u.nickname}
-                                        {u.userId === user.id && ' (вы)'}
+                                        {u.userId === user.id && ' (я)'}
                                     </span>
                                 </div>
                             ))}
@@ -376,12 +435,28 @@ function Chat({ setAuth }) {
                 {/* Input Area */}
                 <div className="chat-input bg-white border-top p-3 shadow">
                     <div className="container-fluid">
+                        {selectedUser && (
+                            <div className="alert alert-info py-2 px-3 mb-2 d-flex justify-content-between align-items-center">
+                                <span>
+                                    📨 Ответ для: <strong>@{selectedUser.nickname}</strong>
+                                </span>
+                                <button
+                                    className="btn btn-sm btn-close"
+                                    onClick={() => setSelectedUser(null)}
+                                    aria-label="Отменить"
+                                ></button>
+                            </div>
+                        )}
                         <form onSubmit={handleSendMessage}>
                             <div className="input-group">
                                 <input
                                     type="text"
                                     className="form-control"
-                                    placeholder={`Сообщение в # ${currentRoom}`}
+                                    placeholder={
+                                        selectedUser
+                                            ? `Сообщение для @${selectedUser.nickname}...`
+                                            : `Сообщение в # ${currentRoom}`
+                                    }
                                     value={inputMessage}
                                     onChange={handleInputChange}
                                     disabled={!connected}
@@ -391,7 +466,7 @@ function Chat({ setAuth }) {
                                     type="submit"
                                     disabled={!connected || !inputMessage.trim()}
                                 >
-                                    Отправить
+                                    {selectedUser ? '📨 Отправить' : 'Отправить'}
                                 </button>
                             </div>
                         </form>

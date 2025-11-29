@@ -56,6 +56,8 @@ const messageSchema = new mongoose.Schema({
   nickname: { type: String, required: true },
   text: { type: String, required: true },
   room: { type: String, required: true, default: "главная" },
+  toUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, // Адресат
+  toNickname: { type: String }, // Никнейм адресата
   timestamp: { type: Date, default: Date.now },
 });
 
@@ -566,6 +568,8 @@ io.on("connection", (socket) => {
         nickname: socket.nickname,
         text: messageData.text,
         room: socket.currentRoom,
+        toUserId: messageData.toUserId || null,
+        toNickname: messageData.toNickname || null,
       });
 
       await message.save();
@@ -577,6 +581,8 @@ io.on("connection", (socket) => {
         nickname: message.nickname,
         text: message.text,
         room: message.room,
+        toUserId: message.toUserId,
+        toNickname: message.toNickname,
         timestamp: message.timestamp,
       });
     } catch (error) {
